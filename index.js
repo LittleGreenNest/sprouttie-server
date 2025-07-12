@@ -24,26 +24,26 @@ app.post('/create-checkout-session', async (req, res) => {
     return res.status(400).json({ error: 'Invalid plan selected' });
   }
 
-  try {
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price: PRICE_LOOKUP[plan],
-          quantity: 1
-        }
-      ],
-      mode: 'subscription',
-      success_url: 'https://app.sprouttie.com/profile?success=true',
-      cancel_url: 'https://app.sprouttie.com/plans'
-    });
+    try {
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    line_items: [
+      {
+        price: PRICE_LOOKUP[plan], // Make sure "plan" is extracted from req.body
+        quantity: 1,
+      },
+    ],
+    mode: 'subscription',
+    success_url: `${process.env.FRONTEND_URL}/success`,
+    cancel_url: `${process.env.FRONTEND_URL}/plans`,
+  });
 
-    res.json({ id: session.id });
-  } catch (error) {
-    console.error('Stripe session creation failed:', error);
-    res.status(500).json({ error: 'Unable to create checkout session' });
-  }
-});
+  res.json({ id: session.id });
+} catch (error) {
+  console.error('Stripe session creation failed:', error);
+  res.status(500).json({ error: 'Unable to create checkout session' });
+}
+
 
 app.get('/', (req, res) => {
   res.send('Sprouttie server running');
