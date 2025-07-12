@@ -18,7 +18,8 @@ const PRICE_LOOKUP = {
 };
 
 app.post('/create-checkout-session', async (req, res) => {
-  const { plan } = req.body;
+  console.log("Incoming plan:", req.body.plan);
+const { plan } = req.body;
 
   if (!PRICE_LOOKUP[plan]) {
     return res.status(400).json({ error: 'Invalid plan selected' });
