@@ -13,8 +13,8 @@ app.use(express.json());
 // Price ID mapping (replace with your actual Stripe price IDs)
 const PRICE_LOOKUP = {
   free: null, // No Stripe session needed
-  basic: 'price_1RjxmFEVoum0YBjs6744HVGF',    // $1 plan
-  premium: 'price_1Rjxn9EVoum0YBjsQmCTopO6'  // $3 plan
+  print: 'price_1RjxmFEVoum0YBjs6744HVGF',    // $1 plan
+  pro: 'price_1Rjxn9EVoum0YBjsQmCTopO6'  // $3 plan
 };
 
 app.post('/create-checkout-session', async (req, res) => {
