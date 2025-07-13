@@ -39,7 +39,7 @@ const { plan } = req.body;
       cancel_url: `${process.env.FRONTEND_URL}/plans`,
     });
 
-    res.json({ id: session.id });
+    res.json({ url: session.url });
   } catch (error) {
     console.error('Stripe session creation failed:', error);
     res.status(500).json({ error: 'Unable to create checkout session' });
