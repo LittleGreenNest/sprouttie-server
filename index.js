@@ -10,16 +10,15 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Price ID mapping (replace with your actual Stripe price IDs)
 const PRICE_LOOKUP = {
-  free: null, // No Stripe session needed
-  print: 'price_1RjxmFEVoum0YBjs6744HVGF',    // $1 plan
-  pro: 'price_1Rjxn9EVoum0YBjsQmCTopO6'  // $3 plan
+  free: null,
+  print: 'price_1RjxmFEVoum0YBjs6744HVGF',
+  pro: 'price_1Rjxn9EVoum0YBjsQmCTopO6'
 };
 
 app.post('/create-checkout-session', async (req, res) => {
-  console.log("Incoming plan:", req.body.plan);
-const { plan } = req.body;
+  const { plan } = req.body;
+  console.log("Incoming plan:", plan);
 
   if (!PRICE_LOOKUP[plan]) {
     return res.status(400).json({ error: 'Invalid plan selected' });
@@ -27,17 +26,15 @@ const { plan } = req.body;
 
   try {
     const session = await stripe.checkout.sessions.create({
-  payment_method_types: ['card'],
-  line_items: [{
-    price: planMap[plan],
-    quantity: 1
-  }],
-  mode: 'subscription',
-  success_url: `${process.env.FRONTEND_URL}/success`,
-  cancel_url: `${process.env.FRONTEND_URL}/plans`,
-});
-Mv 
-
+      payment_method_types: ['card'],
+      line_items: [{
+        price: PRICE_LOOKUP[plan],
+        quantity: 1
+      }],
+      mode: 'subscription',
+      success_url: `${process.env.FRONTEND_URL}/success`,
+      cancel_url: `${process.env.FRONTEND_URL}/plans`,
+    });
 
     res.json({ url: session.url });
   } catch (error) {
@@ -46,7 +43,6 @@ Mv
   }
 });
 
-// Test routes
 app.get('/', (req, res) => {
   res.send('Sprouttie server running');
 });
