@@ -27,17 +27,18 @@ const { plan } = req.body;
 
   try {
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price: PRICE_LOOKUP[plan],
-          quantity: 1,
-        },
-      ],
-      mode: 'subscription',
-      success_url: `${process.env.FRONTEND_URL}/success`,
-      cancel_url: `${process.env.FRONTEND_URL}/plans`,
-    });
+  payment_method_types: ['card'],
+  mode: 'subscription',
+  line_items: [
+    {
+      price: PRICE_LOOKUP[plan],
+      quantity: 1,
+    },
+  ],
+  success_url: `${process.env.FRONTEND_URL}/success`,
+  cancel_url: `${process.env.FRONTEND_URL}/plans`,
+});
+
 
     res.json({ url: session.url });
   } catch (error) {
