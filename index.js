@@ -8,6 +8,12 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
+
+// ✅ Mount Stripe webhook first — before express.json()
+const stripeWebhook = require('./stripe_webhook');
+app.use('/stripe-webhook', stripeWebhook);
+
+// ✅ Now apply JSON body parser for everything else
 app.use(express.json());
 
 const PRICE_LOOKUP = {
@@ -26,17 +32,17 @@ app.post('/create-checkout-session', async (req, res) => {
 
   try {
     const session = await stripe.checkout.sessions.create({
-  payment_method_types: ['card'],
-  line_items: [
-    {
-      price: PRICE_LOOKUP[plan],
-      quantity: 1
-    }
-  ],
-  mode: 'subscription',
-  success_url: `${process.env.FRONTEND_URL}/success`,
-  cancel_url: `${process.env.FRONTEND_URL}/plans`,
-});
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price: PRICE_LOOKUP[plan],
+          quantity: 1
+        }
+      ],
+      mode: 'subscription',
+      success_url: `${process.env.FRONTEND_URL}${successPath}`,
+      cancel_url: `${process.env.FRONTEND_URL}/plans`,
+    });
 
     res.json({ url: session.url });
   } catch (error) {
