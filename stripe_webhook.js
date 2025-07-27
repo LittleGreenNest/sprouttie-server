@@ -1,82 +1,63 @@
-require('dotenv').config();
 const express = require('express');
 const Stripe = require('stripe');
-const bodyParser = require('body-parser');
 const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
 const router = express.Router();
+
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
-  }
-);
+// Lookup map for price_id → plan name
+const PRICE_LOOKUP = {
+  'price_1Rp1LZEVoum0YBjsFK6SriTG': 'print',
+  'price_1Rp1LuEVoum0YBjsKDoh607Y': 'pro',
+};
 
-router.use(bodyParser.raw({ type: 'application/json' }));
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
 
-router.post('/', async (request, response) => {
-  const sig = request.headers['stripe-signature'];
   let event;
-
   try {
-    event = stripe.webhooks.constructEvent(request.body, sig, endpointSecret);
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
-    console.error('Webhook signature verification failed.', err.message);
-    return response.status(400).send(`Webhook Error: ${err.message}`);
+    console.error('Webhook signature error:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  switch (event.type) {
-    case 'invoice.paid': {
-      const invoice = event.data.object;
-      const email = invoice.customer_email;
+  // ✅ Handle checkout success
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const customerEmail = session.customer_email;
+    const priceId = session.line_items?.[0]?.price?.id || session.metadata?.price_id;
 
-      try {
-        const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-        const priceId = subscription.items.data[0].price.id;
+    const plan = PRICE_LOOKUP[priceId];
 
-        let plan = 'free';
-        if (priceId === process.env.PRICE_ID_Print) plan = 'pdf';
-        else if (priceId === process.env.PRICE_ID_PRO) plan = 'pro';
-
-        if (email && plan !== 'free') {
-          const { data: userList, error: listError } = await supabase.auth.admin.listUsers();
-          if (listError) throw listError;
-
-          const matchedUser = userList.users.find((u) => u.email === email);
-
-          if (matchedUser) {
-            const { error: updateError } = await supabase.auth.admin.updateUserById(matchedUser.id, {
-              user_metadata: { plan }
-            });
-
-            if (updateError) {
-              console.error('Failed to update user_metadata:', updateError.message);
-            } else {
-              console.log(`✅ Plan '${plan}' saved in user_metadata for ${email}`);
-            }
-          } else {
-            console.warn(`User with email ${email} not found.`);
-          }
-        }
-      } catch (err) {
-        console.error('Error processing invoice.paid:', err.message);
-      }
-
-      break;
+    if (!plan) {
+      console.warn('Unrecognized priceId:', priceId);
+      return res.status(400).send('Unrecognized plan.');
     }
 
-    default:
-      console.log(`Unhandled event type ${event.type}`);
+    // ✅ Insert or update the user’s plan in Supabase
+    const { error } = await supabase
+      .from('users')
+      .upsert(
+        { email: customerEmail, plan, created_at: new Date().toISOString() },
+        { onConflict: 'email' }
+      );
+
+    if (error) {
+      console.error('Supabase upsert error:', error.message);
+      return res.status(500).send('Database update failed.');
+    }
+
+    console.log(`✅ Plan updated for ${customerEmail}: ${plan}`);
+    return res.status(200).json({ received: true });
   }
 
-  response.send();
+  // Handle other events if needed...
+  res.status(200).json({ received: true });
 });
 
 module.exports = router;
