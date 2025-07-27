@@ -40,7 +40,7 @@ app.post('/create-checkout-session', async (req, res) => {
         }
       ],
       mode: 'subscription',
-      success_url: `${process.env.FRONTEND_URL}${successPath}`,
+success_url: `${process.env.FRONTEND_URL}/pdf-success`,
       cancel_url: `${process.env.FRONTEND_URL}/plans`,
     });
 
