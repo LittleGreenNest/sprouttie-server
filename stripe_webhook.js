@@ -15,7 +15,7 @@ const PRICE_LOOKUP = {
   'price_1Rp1LuEVoum0YBjsKDoh607Y': 'pro',
 };
 
-router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+router.post('/', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
 
   let event;
