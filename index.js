@@ -34,6 +34,14 @@ const PRICE_LOOKUP = {
 app.post('/create-checkout-session', async (req, res) => {
   const { plan } = req.body;
   console.log("Incoming plan:", plan);
+const successUrl = `${process.env.FRONTEND_URL}/pdf-success`;
+const cancelUrl = `${process.env.FRONTEND_URL}/plans`;
+
+console.log("Redirect URLs:", {
+  successUrl,
+  cancelUrl
+});
+
 
   if (!PRICE_LOOKUP[plan]) {
     return res.status(400).json({ error: 'Invalid plan selected' });
@@ -41,17 +49,17 @@ app.post('/create-checkout-session', async (req, res) => {
 
   try {
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price: PRICE_LOOKUP[plan],
-          quantity: 1
-        }
-      ],
-      mode: 'subscription',
-success_url: `${process.env.FRONTEND_URL}/pdf-success`,
-      cancel_url: `${process.env.FRONTEND_URL}/plans`,
-    });
+  payment_method_types: ['card'],
+  line_items: [
+    {
+      price: PRICE_LOOKUP[plan],
+      quantity: 1
+    }
+  ],
+  mode: 'subscription',
+  success_url: successUrl,
+  cancel_url: cancelUrl,
+});
 
     res.json({ url: session.url });
   } catch (error) {
