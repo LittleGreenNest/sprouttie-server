@@ -2,12 +2,21 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const app = express();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+app.options('*', cors({
+  origin: 'https://sprouttie.onrender.com',
+  credentials: true,
+}));
+
+
+app.use(cors({
+origin: 'https://sprouttie.onrender.com',
+  credentials: true,
+}));
 
 // ✅ Mount Stripe webhook first — before express.json()
 const stripeWebhook = require('./stripe_webhook');
