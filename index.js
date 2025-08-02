@@ -13,8 +13,8 @@ app.options('*', cors({
 }));
 
 
-app.use(cors({
-origin: 'https://sprouttie.onrender.com',
+app.options('*', cors({
+  origin: 'https://sprouttie.onrender.com',
   credentials: true,
 }));
 
