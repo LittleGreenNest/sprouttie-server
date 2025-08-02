@@ -29,9 +29,14 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
   // ✅ Handle checkout success
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
-    const customerEmail = session.customer_email;
-    const priceId = session.line_items?.[0]?.price?.id || session.metadata?.price_id;
 
+    // ✅ Retrieve full session with line items
+    const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
+      expand: ['line_items'],
+    });
+
+    const customerEmail = fullSession.customer_email;
+    const priceId = fullSession.line_items?.data?.[0]?.price?.id;
     const plan = PRICE_LOOKUP[priceId];
 
     if (!plan) {
@@ -56,7 +61,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     return res.status(200).json({ received: true });
   }
 
-  // Handle other events if needed...
   res.status(200).json({ received: true });
 });
 
