@@ -1,65 +1,88 @@
 // /server/index.js
 require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const app = express();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const PORT = process.env.PORT || 5000;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://sprouttie.onrender.com';
 
-app.use(cors({
-  origin: 'https://sprouttie.onrender.com',
-  credentials: true,
-}));
+// CORS (adjust if you have multiple frontends)
+app.use(
+  cors({
+    origin: FRONTEND_URL,
+    credentials: true,
+  })
+);
 
-
-// ✅ Mount Stripe webhook first — before express.json()
+/**
+ * IMPORTANT: Mount Stripe webhook BEFORE express.json()
+ * Your stripe_webhook module should use express.raw({ type: 'application/json' })
+ * for the webhook route.
+ */
 const stripeWebhook = require('./stripe_webhook');
 app.use('/stripe-webhook', stripeWebhook);
 
-// ✅ Now apply JSON body parser for everything else
+// JSON parser for the rest
 app.use(express.json());
 
-const PRICE_LOOKUP = {
+// ---------- Prices via ENV ----------
+const PRICES = {
   free: null,
-  print: 'price_1RjxmFEVoum0YBjs6744HVGF',
-  pro: 'price_1Rjxn9EVoum0YBjsQmCTopO6'
+  print: process.env.PRICE_ID_Print,
+  pro: process.env.PRICE_ID_PRO,
 };
 
-app.post('/create-checkout-session', async (req, res) => {
-  const { plan } = req.body;
-  console.log("Incoming plan:", plan);
-const successUrl = `${process.env.FRONTEND_URL}/pdf-success`;
-const cancelUrl = `${process.env.FRONTEND_URL}/plans`;
-
-console.log("Redirect URLs:", {
-  successUrl,
-  cancelUrl
+// Fail fast if missing required env vars
+['STRIPE_SECRET_KEY', 'PRICE_ID_Print', 'PRICE_ID_PRO', 'FRONTEND_URL'].forEach((k) => {
+  if (!process.env[k]) {
+    console.warn(`[BOOT] Missing env var ${k}`);
+  }
 });
 
+// Masking helper for safe logs
+const mask = (v) =>
+  typeof v === 'string' && v.startsWith('price_')
+    ? v.slice(0, 8) + '...' + v.slice(-6)
+    : v;
 
-  if (!PRICE_LOOKUP[plan]) {
+// Log what the server booted with (masked)
+console.log('[BOOT] Stripe prices:', {
+  PRICE_ID_Print: mask(process.env.PRICE_ID_Print),
+  PRICE_ID_PRO: mask(process.env.PRICE_ID_PRO),
+});
+console.log('[BOOT] FRONTEND_URL:', FRONTEND_URL);
+
+// ---------- Routes ----------
+app.post('/create-checkout-session', async (req, res) => {
+  const { plan } = req.body;
+  console.log('[CHECKOUT] Incoming plan:', plan);
+
+  const successUrl = `${FRONTEND_URL}/pdf-success`;
+  const cancelUrl = `${FRONTEND_URL}/plans`;
+  console.log('[CHECKOUT] Redirect URLs:', { successUrl, cancelUrl });
+
+  const priceId = PRICES[plan];
+  console.log('[CHECKOUT] Resolved priceId:', mask(priceId));
+
+  if (!priceId) {
     return res.status(400).json({ error: 'Invalid plan selected' });
   }
 
   try {
     const session = await stripe.checkout.sessions.create({
-  payment_method_types: ['card'],
-  line_items: [
-    {
-      price: PRICE_LOOKUP[plan],
-      quantity: 1
-    }
-  ],
-  mode: 'subscription',
-  success_url: successUrl,
-  cancel_url: cancelUrl,
-});
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+    });
 
-    res.json({ url: session.url });
+    return res.json({ url: session.url });
   } catch (error) {
-    console.error('Stripe session creation failed:', error);
-    res.status(500).json({ error: 'Unable to create checkout session' });
+    console.error('[CHECKOUT] Stripe session creation failed:', error);
+    return res.status(500).json({ error: 'Unable to create checkout session' });
   }
 });
 
@@ -71,6 +94,17 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// (Optional) Quick probe to verify envs on the deployed server
+// Remove after testing.
+// app.get('/debug/prices', (req, res) => {
+//   res.json({
+//     print: mask(process.env.PRICE_ID_Print),
+//     pro: mask(process.env.PRICE_ID_PRO),
+//     frontend: FRONTEND_URL,
+//     server: 'ok',
+//   });
+// });
+
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`[BOOT] Server listening on port ${PORT}`);
 });
