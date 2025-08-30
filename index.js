@@ -9,13 +9,37 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const PORT = process.env.PORT || 5000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://sprouttie.onrender.com';
 
-// CORS (adjust if you have multiple frontends)
+// CORS: allow prod app + local dev
+const allowedOrigins = [
+  process.env.FRONTEND_URL || 'https://sprouttie.onrender.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+];
+
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin(origin, cb) {
+      if (!origin) return cb(null, true); // allow curl/Postman/no-origin
+      return allowedOrigins.includes(origin)
+        ? cb(null, true)
+        : cb(new Error('Not allowed by CORS'));
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
   })
 );
+
+// Ensure OPTIONS preflight succeeds
+app.options(
+  '*',
+  cors({
+    origin: allowedOrigins,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  })
+);
+
 
 /**
  * IMPORTANT: Mount Stripe webhook BEFORE express.json()
@@ -57,16 +81,14 @@ console.log('[BOOT] FRONTEND_URL:', FRONTEND_URL);
 
 // ---------- Routes ----------
 app.post('/create-checkout-session', async (req, res) => {
-  const { plan } = req.body;
-  console.log('[CHECKOUT] Incoming plan:', plan);
+  const { plan, userId, email } = req.body; // <-- add these
+
+  console.log('[CHECKOUT] Incoming:', { plan, userId, email });
 
   const successUrl = `${FRONTEND_URL}/pdf-success`;
   const cancelUrl = `${FRONTEND_URL}/plans`;
-  console.log('[CHECKOUT] Redirect URLs:', { successUrl, cancelUrl });
 
   const priceId = PRICES[plan];
-  console.log('[CHECKOUT] Resolved priceId:', mask(priceId));
-
   if (!priceId) {
     return res.status(400).json({ error: 'Invalid plan selected' });
   }
@@ -77,6 +99,11 @@ app.post('/create-checkout-session', async (req, res) => {
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: successUrl,
       cancel_url: cancelUrl,
+
+      // ✅ identifiers for the webhook
+      client_reference_id: userId,
+      customer_email: email,
+      metadata: { user_id: userId, plan },
     });
 
     return res.json({ url: session.url });
@@ -85,6 +112,7 @@ app.post('/create-checkout-session', async (req, res) => {
     return res.status(500).json({ error: 'Unable to create checkout session' });
   }
 });
+
 
 app.get('/', (req, res) => {
   res.send('Sprouttie server running');
