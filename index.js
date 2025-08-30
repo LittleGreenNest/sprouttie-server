@@ -7,11 +7,11 @@ const app = express();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://sprouttie.onrender.com';
+const FRONTEND_URL = process.env.FRONTEND_URL;
 
 // CORS: allow prod app + local dev
 const allowedOrigins = [
-  process.env.FRONTEND_URL || 'https://sprouttie.onrender.com',
+  process.env.FRONTEND_URL,
   'http://localhost:3000',
   'http://127.0.0.1:3000',
 ];
