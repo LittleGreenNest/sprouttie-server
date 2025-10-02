@@ -1,138 +1,234 @@
-// /server/index.js
+// server/index.js
 require('dotenv').config();
 
 const express = require('express');
+const Stripe = require('stripe');
+const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
+
 const app = express();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const port = process.env.PORT || 5001;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL;
-
-// CORS: allow prod app + local dev
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-];
-
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true); // allow curl/Postman/no-origin
-      return allowedOrigins.includes(origin)
-        ? cb(null, true)
-        : cb(new Error('Not allowed by CORS'));
-    },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-  })
+// Supabase admin (service role)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Ensure OPTIONS preflight succeeds
-app.options(
-  '*',
-  cors({
-    origin: allowedOrigins,
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-  })
+// ---- Boot logs (safe) ----
+console.log('[BOOT] Stripe prices:', {
+  PRICE_ID_PRINT: redact(process.env.PRICE_ID_PRINT),
+  PRICE_ID_PRO: redact(process.env.PRICE_ID_PRO),
+});
+console.log('[BOOT] FRONTEND_URL:', process.env.FRONTEND_URL);
+console.log(
+  '[BOOT] Using test key:',
+  process.env.STRIPE_SECRET_KEY?.startsWith('sk_test_')
 );
 
+// Helper to avoid printing full IDs
+function redact(v) {
+  if (!v) return v;
+  return v.slice(0, 7) + '...' + v.slice(-6);
+}
 
-/**
- * IMPORTANT: Mount Stripe webhook BEFORE express.json()
- * Your stripe_webhook module should use express.raw({ type: 'application/json' })
- * for the webhook route.
- */
-const stripeWebhook = require('./stripe_webhook');
-app.use('/stripe-webhook', stripeWebhook);
+// =============================
+// 1) Stripe WEBHOOK (raw body)
+//    MUST be before express.json()
+// =============================
+app.post(
+  '/stripe-webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const sig = req.headers['stripe-signature'];
 
-// JSON parser for the rest
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error('[WB] Signature verification failed:', err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Helper to persist plan/status to Supabase
+    const setPlan = async (user_id, plan, status, extra = {}) => {
+      if (!user_id || !plan) {
+        console.warn('[WB] Missing user_id/plan; skip update');
+        return;
+      }
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          plan,
+          subscription_status: status,
+          plan_status: status,
+          ...extra,
+        })
+        .eq('id', user_id);
+      if (error) throw error;
+      console.log('[WB] Profile updated →', { user_id, plan, status });
+    };
+
+    try {
+      console.log('[WB] Event:', event.type);
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          const s = event.data.object;
+          const user_id = s.metadata?.user_id;
+          const plan = s.metadata?.plan;
+          await setPlan(user_id, plan, 'active', {
+            stripe_customer_id: s.customer,
+            stripe_subscription_id: s.subscription,
+          });
+
+          // Send welcome email (best-effort; don't fail webhook if it errors)
+          try {
+            await resend.emails.send({
+              from: 'Sprouttie <hello@sprouttie.com>',
+              to: s.customer_details?.email || s.customer_email,
+              subject:
+                plan === 'pro'
+                  ? 'Welcome to Sprouttie Pro 🌱'
+                  : 'Welcome to Sprouttie Print 🌱',
+              html: `
+                <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto;line-height:1.6">
+                  <h2>You're in — ${plan?.toUpperCase()} activated!</h2>
+                  <p>Thanks for supporting Sprouttie. Your ${plan} plan is now active.</p>
+                  <ul>
+                    <li>Open the app and head to <strong>Print Flashcards</strong> to try your new features.</li>
+                    <li>Need help? Just reply to this email.</li>
+                  </ul>
+                  <p>— The Sprouttie Team</p>
+                </div>
+              `,
+            });
+          } catch (mailErr) {
+            console.error('[WB] Resend welcome email failed:', mailErr);
+          }
+          break;
+        }
+
+        case 'customer.subscription.updated': {
+          const sub = event.data.object;
+          const plan =
+            sub.metadata?.plan ||
+            (sub.items?.data?.[0]?.price?.id === process.env.PRICE_ID_PRO
+              ? 'pro'
+              : 'print');
+          const user_id = sub.metadata?.user_id;
+          await setPlan(user_id, plan, sub.status, {
+            stripe_subscription_id: sub.id,
+          });
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const sub = event.data.object;
+          const user_id = sub.metadata?.user_id;
+          await setPlan(user_id, 'free', 'canceled');
+          break;
+        }
+
+        case 'invoice.paid':
+        case 'invoice.payment_succeeded': {
+          const inv = event.data.object;
+          const subId = inv.subscription;
+          const customerId = inv.customer;
+
+          const sub = await stripe.subscriptions.retrieve(subId, {
+            expand: ['items.data.price'],
+          });
+
+          const user_id = sub.metadata?.user_id;
+          const plan =
+            sub.metadata?.plan ||
+            (sub.items?.data?.[0]?.price?.id === process.env.PRICE_ID_PRO
+              ? 'pro'
+              : 'print');
+
+          await setPlan(user_id, plan, sub.status, {
+            stripe_customer_id: customerId,
+            stripe_subscription_id: subId,
+          });
+          break;
+        }
+
+        default:
+          // ignore others
+          break;
+      }
+
+      res.json({ received: true });
+    } catch (e) {
+      console.error('[WB] Handler error:', e);
+      res.status(500).send('Webhook handler error');
+    }
+  }
+);
+
+// =============================
+// JSON parser for normal routes
+// =============================
 app.use(express.json());
 
-// ---------- Prices via ENV ----------
-const PRICES = {
-  free: null,
-  print: process.env.PRICE_ID_Print,
-  pro: process.env.PRICE_ID_PRO,
-};
+// CORS for client -> server calls
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    methods: ['GET', 'POST', 'OPTIONS'],
+  })
+);
 
-// Fail fast if missing required env vars
-['STRIPE_SECRET_KEY', 'PRICE_ID_Print', 'PRICE_ID_PRO', 'FRONTEND_URL'].forEach((k) => {
-  if (!process.env[k]) {
-    console.warn(`[BOOT] Missing env var ${k}`);
-  }
-});
+// Health
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// Masking helper for safe logs
-const mask = (v) =>
-  typeof v === 'string' && v.startsWith('price_')
-    ? v.slice(0, 8) + '...' + v.slice(-6)
-    : v;
-
-// Log what the server booted with (masked)
-console.log('[BOOT] Stripe prices:', {
-  PRICE_ID_Print: mask(process.env.PRICE_ID_Print),
-  PRICE_ID_PRO: mask(process.env.PRICE_ID_PRO),
-});
-console.log('[BOOT] FRONTEND_URL:', FRONTEND_URL);
-
-// ---------- Routes ----------
+// =========================================
+// 2) Create Checkout Session (with metadata)
+// =========================================
 app.post('/create-checkout-session', async (req, res) => {
-  const { plan, userId, email } = req.body; // <-- add these
-
-  console.log('[CHECKOUT] Incoming:', { plan, userId, email });
-
-  const successUrl = `${FRONTEND_URL}/pdf-success`;
-  const cancelUrl = `${FRONTEND_URL}/plans`;
-
-  const priceId = PRICES[plan];
-  if (!priceId) {
-    return res.status(400).json({ error: 'Invalid plan selected' });
-  }
-
   try {
+    const { plan, userId, email } = req.body;
+    console.log('[CHECKOUT] Incoming:', { plan, userId, email });
+
+    // map plan -> price
+    let priceId;
+    if (plan === 'pro') priceId = process.env.PRICE_ID_PRO;
+    else if (plan === 'print') priceId = process.env.PRICE_ID_PRINT;
+    else return res.status(400).json({ error: 'Invalid plan' });
+
+    const successUrl = `${process.env.FRONTEND_URL}/profile?payment=success&plan=${plan}`;
+    const cancelUrl = `${process.env.FRONTEND_URL}/plans`;
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
+      customer_email: email,
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: successUrl,
       cancel_url: cancelUrl,
-
-      // ✅ identifiers for the webhook
       client_reference_id: userId,
-      customer_email: email,
       metadata: { user_id: userId, plan },
+      subscription_data: { metadata: { user_id: userId, plan } },
     });
 
-    return res.json({ url: session.url });
-  } catch (error) {
-    console.error('[CHECKOUT] Stripe session creation failed:', error);
-    return res.status(500).json({ error: 'Unable to create checkout session' });
+    console.log('[CHECKOUT] Session created successfully:', session.id);
+
+    res.status(200).json({ id: session.id, url: session.url });
+  } catch (err) {
+    console.error('[CHECKOUT] Stripe session creation failed:', err);
+    res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
 
-
-app.get('/', (req, res) => {
-  res.send('Sprouttie server running');
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-// (Optional) Quick probe to verify envs on the deployed server
-// Remove after testing.
-// app.get('/debug/prices', (req, res) => {
-//   res.json({
-//     print: mask(process.env.PRICE_ID_Print),
-//     pro: mask(process.env.PRICE_ID_PRO),
-//     frontend: FRONTEND_URL,
-//     server: 'ok',
-//   });
-// });
-
-app.listen(PORT, () => {
-  console.log(`[BOOT] Server listening on port ${PORT}`);
+// =============================
+// Start server
+// =============================
+app.listen(port, () => {
+  console.log(`[BOOT] Server running on port ${port}`);
 });
