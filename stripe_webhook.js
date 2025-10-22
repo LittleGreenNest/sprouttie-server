@@ -12,7 +12,7 @@ const admin = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVIC
 // Map Stripe price IDs → your internal plan keys
 // Fixed: Use 'print' instead of 'pdf' to match your frontend
 const PRICE_LOOKUP = {
-  [process.env.PRICE_ID_Print]: 'print', // Changed from 'pdf' to 'print'
+  [process.env.PRICE_ID_PRINT]: 'print', // Changed from 'pdf' to 'print'
   [process.env.PRICE_ID_PRO]: 'pro',
 };
 
