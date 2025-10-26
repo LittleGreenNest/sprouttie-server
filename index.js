@@ -47,131 +47,10 @@ function redact(v) {
   return v.slice(0, 7) + '...' + v.slice(-6);
 }
 
-// =============================
-// 1) Stripe WEBHOOK (raw body)
-// =============================
-app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
+// ⬇️ Mount the webhook FIRST so it receives the raw body
 
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error('[WB] Signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // ✅ Idempotency
-  try {
-    const { error: insertErr } = await supabase
-      .from('stripe_events')
-      .insert({ id: event.id });
-    if (insertErr && (insertErr.code === '23505' || insertErr.message?.includes('duplicate'))) {
-      console.log(`[WB] Duplicate event ${event.id}, skipping`);
-      return res.json({ received: true });
-    }
-  } catch (e) {
-    console.error('[WB] Idempotency insert failed:', e);
-    return res.status(500).send('Guard error');
-  }
-
-  const setPlan = async (user_id, plan, status, extra = {}) => {
-  if (!user_id) return;
-  const update = { id: user_id, plan, subscription_status: status, ...extra };
-  const { error } = await supabase
-    .from('profiles')
-    .upsert(update, { onConflict: 'id' });
-  if (error) console.error('[WB] Supabase upsert error:', error);
-  else console.log('[WB] Profile upserted →', { user_id, plan, status });
-};
-
-  const mapPriceToPlan = (priceId) => {
-    const P = {
-      print: [process.env.PRICE_ID_PRINT_MONTHLY, process.env.PRICE_ID_PRINT_YEARLY],
-      pro:   [process.env.PRICE_ID_PRO_MONTHLY,   process.env.PRICE_ID_PRO_YEARLY],
-    };
-    if (P.print.includes(priceId)) return 'print';
-    if (P.pro.includes(priceId))   return 'pro';
-    return null;
-  };
-
-  try {
-    console.log('[WB] Event:', event.type);
-
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const s = event.data.object;
-        const user_id = s.client_reference_id || s.metadata?.user_id;
-        const sub_id  = s.subscription;
-console.log('[WB] checkout.session.completed →', {
-  user_id, sub_id, email: s.customer_details?.email || s.customer_email
-});
-
-        // derive plan from subscription price if metadata missing
-        let plan = s.metadata?.plan || null;
-        if (!plan && sub_id) {
-          const sub = await stripe.subscriptions.retrieve(sub_id, { expand: ['items.data.price'] });
-          const priceId = sub.items?.data?.[0]?.price?.id || null;
-          plan = mapPriceToPlan(priceId) || 'print';
-        }
-
-        await setPlan(user_id, plan, 'active', {
-          stripe_customer_id: s.customer,
-          stripe_subscription_id: sub_id
-        });
-
-        // best-effort welcome email
-        try {
-          if (resend) {
-            await resend.emails.send({
-              from: 'Sprouttie <hello@sprouttie.com>',
-              to: s.customer_details?.email || s.customer_email,
-              subject: plan === 'pro' ? 'Welcome to Sprouttie Pro 🌱' : 'Welcome to Sprouttie Print 🌱',
-              html: '<p>Thanks for subscribing! 🎉</p>'
-            });
-          } else {
-            console.log('[EMAIL] RESEND_API_KEY not set — skipping');
-          }
-        } catch (e) {
-          console.warn('[WB] Resend failed (non-fatal):', e.message);
-        }
-        break;
-      }
-
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated': {
-        const sub = event.data.object;
-        const user_id = sub.metadata?.user_id;
-        const priceId = sub.items?.data?.[0]?.price?.id || null;
-        const plan = mapPriceToPlan(priceId) || sub.metadata?.plan || 'print';
-        const periodEndIso = sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null;
-
-        await setPlan(user_id, plan, sub.status, {
-          stripe_subscription_id: sub.id,
-          current_period_end: periodEndIso
-        });
-        break;
-      }
-
-      case 'customer.subscription.deleted': {
-        const sub = event.data.object;
-        const user_id = sub.metadata?.user_id;
-        await setPlan(user_id, 'free', 'canceled', { stripe_subscription_id: sub.id });
-        break;
-      }
-
-      default:
-        // accept but ignore others
-        break;
-    }
-
-    return res.json({ received: true });
-  } catch (err) {
-    console.error('[WB] handler error:', err);
-    return res.status(500).send('Webhook handler error');
-  }
-});
-
+const stripeWebhook = require('./stripe_webhook');
+app.use('/stripe-webhook', stripeWebhook);
 
 // =============================
 // JSON parser for normal routes
@@ -260,17 +139,40 @@ app.post('/create-checkout-session', async (req, res) => {
       if (updErr) console.warn('[CHECKOUT] Supabase profiles update error:', updErr);
     }
 
+
+// --- derive userId from Supabase Auth token (server-side verification) ---
+const supaJwt = req.headers.authorization?.replace('Bearer ', '');
+let verifiedUserId = userId;
+
+if (supaJwt) {
+  try {
+    const { data, error } = await supabase.auth.getUser(supaJwt);
+    if (!error && data?.user?.id) {
+      verifiedUserId = data.user.id;
+    }
+  } catch (e) {
+    console.warn('[CHECKOUT] Supabase auth verify failed:', e.message);
+  }
+}
+
+// fallback if client provided it directly (already handled above)
+if (!verifiedUserId) {
+  return res.status(400).json({ error: 'Missing verified userId' });
+}
+
     // 3) Create Checkout session
     const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      customer: customerId,
-      line_items: [{ price: priceId, quantity: 1 }],
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      client_reference_id: userId,
-      metadata: { user_id: userId, plan },
-      subscription_data: { metadata: { user_id: userId, plan } },
-    });
+  mode: 'subscription',
+  customer: customerId,
+  line_items: [{ price: priceId, quantity: 1 }],
+  success_url: successUrl,
+  cancel_url: cancelUrl,
+  client_reference_id: verifiedUserId,
+  metadata: { user_id: verifiedUserId, plan },
+  subscription_data: { metadata: { user_id: verifiedUserId, plan } },
+}, {
+  idempotencyKey: `${verifiedUserId}:${plan}:${billingCycle}`,
+});
 
     console.log('[CHECKOUT] Session created:', session.id);
     return res.status(200).json({ id: session.id, url: session.url });
@@ -345,8 +247,6 @@ app.post('/create-portal-session', async (req, res) => {
     return res.status(500).json({ error: msg });
   }
 });
-
-
 
 // =============================
 // Start server
